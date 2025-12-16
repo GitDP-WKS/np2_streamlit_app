@@ -14,8 +14,13 @@ DEFAULT_GIDS: List[str] = [
     "100006210","1678514560","1664238791","1022163523","824830115","2075524941"
 ]
 
-# ВАЖНО: по твоей правке — "NSP" в таблицах = "ЗЭТЗ"
-PLANTS = ["E-Prom", "ЗЭТЗ", "Другое"]  # "Другое" = нет принадлежности / пусто / не распознано
+# ВАЖНО:
+# - "NSP" в таблицах = "ЗЭТЗ"
+# - все обращения без производителя/станции (пусто или не распознано) тоже считаем,
+#   но вместо "Другое" используем понятный ярлык:
+MISC_LABEL = "Прочие вопросы без привязки к станции + Чат Бот"
+
+PLANTS = ["E-Prom", "ЗЭТЗ", MISC_LABEL]
 
 # ======== ВСПОМОГАТЕЛЬНЫЕ ========
 def gsheets_csv_url(sheet_id: str, gid: str) -> str:
@@ -45,12 +50,13 @@ def pick_col(columns: List[str], candidates: List[str]) -> Optional[str]:
     return None
 
 def vendor_to_plant(v: str) -> str:
-    """Строго: E-Prom / ЗЭТЗ / Другое.
-    NSP в исходных данных считаем как ЗЭТЗ (как ты написал).
+    """Строго: E-Prom / ЗЭТЗ / MISC_LABEL.
+    NSP/НСП в исходных данных считаем как ЗЭТЗ.
+    Пусто/NaN/не распознано -> MISC_LABEL.
     """
     s = norm(v)
     if not s or s == "nan":
-        return "Другое"
+        return MISC_LABEL
 
     # ЗЭТЗ (включая "NSP" как обозначение в таблицах)
     if "зэтз" in s or "zetz" in s or "nsp" in s or "нсп" in s:
@@ -60,7 +66,7 @@ def vendor_to_plant(v: str) -> str:
     if "e-prom" in s or "eprom" in s or "e prom" in s or "е-пром" in s or "епром" in s:
         return "E-Prom"
 
-    return "Другое"
+    return MISC_LABEL
 
 def parse_dt_smart(df: pd.DataFrame, col_date: str, col_time: Optional[str]) -> pd.Series:
     if col_time:
@@ -175,19 +181,7 @@ if df["_dt"].isna().all():
 if col_vendor and col_vendor in df.columns:
     df["Завод"] = df[col_vendor].astype(str).apply(vendor_to_plant)
 else:
-    df["Завод"] = "Другое"
-
-# Диагностика завода
-with st.expander("🔎 Диагностика завода"):
-    if col_vendor and col_vendor in df.columns:
-        vc = df[col_vendor].astype(str).value_counts().head(30).reset_index()
-        vc.columns = ["Значение в исходной колонке", "Строк"]
-        st.dataframe(vc, use_container_width=True, hide_index=True)
-    st.write("После нормализации (Завод):")
-    st.dataframe(
-        df["Завод"].value_counts().reset_index().rename(columns={"index":"Завод","Завод":"Строк"}),
-        use_container_width=True, hide_index=True
-    )
+    df["Завод"] = MISC_LABEL
 
 # ======== ФИЛЬТРЫ (2025 по умолчанию) ========
 st.subheader("Фильтры")
@@ -212,7 +206,7 @@ with f3:
     else:
         start_date, end_date = None, None
 with f4:
-    plant_filter = st.multiselect("Завод", options=PLANTS, default=["E-Prom","ЗЭТЗ"])
+    plant_filter = st.multiselect("Завод", options=PLANTS, default=PLANTS)
 
 fdf = df_2025.copy()
 if period_mode == "Месяц" and month:
@@ -226,21 +220,22 @@ if plant_filter:
     fdf = fdf[fdf["Завод"].isin(plant_filter)]
 
 # ======== KPI ========
-k1, k2, k3, k4 = st.columns(4)
+k1, k2, k3, k4, k5 = st.columns(5)
 total = int(len(fdf))
 uniq_station = int(fdf[col_station].nunique()) if col_station else 0
 k1.metric("Обращений", total)
 k2.metric("Уникальных ЭЗС", uniq_station if col_station else "—")
 k3.metric("E-Prom", int((fdf["Завод"] == "E-Prom").sum()) if total else 0)
 k4.metric("ЗЭТЗ", int((fdf["Завод"] == "ЗЭТЗ").sum()) if total else 0)
+k5.metric("Без привязки", int((fdf["Завод"] == MISC_LABEL).sum()) if total else 0)
 
 st.divider()
 
 # ======== 1) Причина x Завод (строго 3 колонки) ========
-st.markdown("### Разбивка по причинам × завод (E-Prom / ЗЭТЗ)")
+st.markdown("### Разбивка по причинам × завод (E-Prom / ЗЭТЗ / без привязки)")
 tab = pd.crosstab(
     fdf[col_reason].fillna("—").astype(str),
-    fdf["Завод"].fillna("Другое").astype(str),
+    fdf["Завод"].fillna(MISC_LABEL).astype(str),
     dropna=False,
 )
 
@@ -250,7 +245,7 @@ for p in PLANTS:
 tab = tab[PLANTS]
 tab = add_totals(tab, row_name="Итого")
 
-view_reason = tab.reset_index().rename(columns={"index":"Причина", col_reason:"Причина"})
+view_reason = tab.reset_index().rename(columns={"index": "Причина", col_reason: "Причина"})
 st.dataframe(view_reason, use_container_width=True, hide_index=True)
 
 st.divider()
@@ -287,7 +282,7 @@ else:
     )
     plant_mode = (
         fdf.groupby(col_station)["Завод"]
-           .agg(lambda s: s.dropna().astype(str).mode().iloc[0] if len(s.dropna()) else "Другое")
+           .agg(lambda s: s.dropna().astype(str).mode().iloc[0] if len(s.dropna()) else MISC_LABEL)
     )
     top5["Завод"] = top5[col_station].map(plant_mode)
     top5_view = top5
@@ -332,4 +327,4 @@ with d2:
         mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
     )
 
-st.caption("Лёгкая версия v3: 'NSP' в исходных значениях маппится в 'ЗЭТЗ'. Колонки заводов: E-Prom / ЗЭТЗ / Другое.")
+st.caption("Лёгкая версия v4: пустые/неизвестные производители считаются в отдельную колонку без привязки.")
