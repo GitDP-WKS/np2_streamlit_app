@@ -1,25 +1,21 @@
 import re
 from io import BytesIO
-from typing import Dict, List, Optional, Tuple
+from typing import List, Optional, Tuple
 
 import pandas as pd
 import streamlit as st
 
 st.set_page_config(page_title="ЭЗС — обращения (2025)", layout="wide")
 
-# ======== НАСТРОЙКИ ПО УМОЛЧАНИЮ ========
+# ======== НАСТРОЙКИ ========
 DEFAULT_SHEET_ID = "1YN_8UtrZMqOTYZHaLzczwkkfocD-sS_wKrlSBmn-S50"
-# Январь–декабрь 2025 + итоговый лист (как ты прислал)
 DEFAULT_GIDS: List[str] = [
     "880054222","290665501","1707951068","1280453214","1898471504","1456377749",
     "100006210","1678514560","1664238791","1022163523","824830115","2075524941"
 ]
 
-# Нормализация производителя -> завод
-DEFAULT_VENDOR_MAP: Dict[str, List[str]] = {
-    "ЕПРОМ": ["епром", "eprom", "e-prom", "e prom"],
-    "НСП":   ["нсп", "nsp"],
-}
+# Колонки заводов строго такие:
+PLANTS = ["E-Prom", "NSP", "Другое"]  # "Другое" = нет принадлежности к заводу / пусто / не распознано
 
 # ======== ВСПОМОГАТЕЛЬНЫЕ ========
 def gsheets_csv_url(sheet_id: str, gid: str) -> str:
@@ -41,7 +37,6 @@ def pick_col(columns: List[str], candidates: List[str]) -> Optional[str]:
         k = norm(cand)
         if k in m:
             return m[k]
-    # partial fallback
     for cand in candidates:
         k = norm(cand)
         for nk, orig in m.items():
@@ -49,15 +44,17 @@ def pick_col(columns: List[str], candidates: List[str]) -> Optional[str]:
                 return orig
     return None
 
-def vendor_to_plant(v: str, vendor_map: Dict[str, List[str]]) -> str:
+def vendor_to_plant(v: str) -> str:
+    """Строго: E-Prom / NSP / Другое."""
     s = norm(v)
     if not s or s == "nan":
-        return "—"
-    for plant, keys in vendor_map.items():
-        for k in keys:
-            kk = norm(k)
-            if kk and kk in s:
-                return plant
+        return "Другое"
+    # NSP
+    if "nsp" in s or "нсп" in s:
+        return "NSP"
+    # E-Prom
+    if "e-prom" in s or "eprom" in s or "e prom" in s or "е-пром" in s or "епром" in s:
+        return "E-Prom"
     return "Другое"
 
 def parse_dt_smart(df: pd.DataFrame, col_date: str, col_time: Optional[str]) -> pd.Series:
@@ -94,7 +91,6 @@ def load_all(sheet_id: str, gids: List[str]) -> Tuple[pd.DataFrame, List[str]]:
     return out, errors
 
 def add_totals(df: pd.DataFrame, row_name: str = "Итого") -> pd.DataFrame:
-    # df: rows x cols (числа)
     df2 = df.copy()
     df2[row_name] = df2.sum(axis=1)
     total_row = pd.DataFrame(df2.sum(axis=0)).T
@@ -108,15 +104,10 @@ with st.sidebar:
     st.header("Источник (Google Sheets)")
     sheet_id = st.text_input("Sheet ID", value=DEFAULT_SHEET_ID)
     gids_text = st.text_area("GID листов (через запятую)", value=",".join(DEFAULT_GIDS), height=100)
-    st.caption("Важно: таблица должна быть расшарена как “Anyone with the link → Viewer”.")
+    st.caption("Таблица должна быть расшарена: “Anyone with the link → Viewer”.")
     if st.button("🔄 Сбросить кэш"):
         st.cache_data.clear()
         st.toast("Кэш очищен.", icon="✅")
-
-    st.divider()
-    st.header("Заводы (сопоставление)")
-    st.caption("По умолчанию: ЕПРОМ / НСП. Если производители пишутся иначе — допиши ключи в коде или скажи мне.")
-    vendor_map = DEFAULT_VENDOR_MAP
 
 gids = [g.strip() for g in str(gids_text).split(",") if g.strip()]
 raw, errors = load_all(sheet_id, gids)
@@ -138,9 +129,8 @@ auto_date = pick_col(cols, ["Дата обращения", "Дата", "Date"])
 auto_time = pick_col(cols, ["Время обращения", "Время", "Time"])
 auto_reason = pick_col(cols, ["Причина обращения", "Причина", "Problem", "Причина/тема"])
 auto_station = pick_col(cols, ["Номер ЭЗС", "ЭЗС", "Station", "Станция"])
-auto_vendor = pick_col(cols, ["Производитель станции", "Производитель", "Vendor"])
+auto_vendor = pick_col(cols, ["Производитель станции", "Производитель", "Завод", "Vendor"])
 auto_note = pick_col(cols, ["Примечание", "Комментарий", "Note"])
-auto_id = pick_col(cols, ["№", "N", "No", "Номер", "ID"])
 
 with st.expander("🛠️ Сопоставление колонок (если авто не угадал)"):
     c1, c2 = st.columns(2)
@@ -153,13 +143,12 @@ with st.expander("🛠️ Сопоставление колонок (если а
     with c2:
         col_station = st.selectbox("Колонка НОМЕР ЭЗС (можно пусто)", options=["— нет —"] + cols,
                                    index=(1 + cols.index(auto_station) if auto_station in cols else 0))
-        col_vendor = st.selectbox("Колонка ПРОИЗВОДИТЕЛЬ (для заводов)", options=["— нет —"] + cols,
+        col_vendor = st.selectbox("Колонка ПРОИЗВОДИТЕЛЬ/ЗАВОД", options=["— нет —"] + cols,
                                   index=(1 + cols.index(auto_vendor) if auto_vendor in cols else 0))
         col_note = st.selectbox("Колонка ПРИМЕЧАНИЕ (можно пусто)", options=["— нет —"] + cols,
                                 index=(1 + cols.index(auto_note) if auto_note in cols else 0))
     st.dataframe(df.head(10), use_container_width=True)
 
-# normalize
 col_time = None if col_time == "— нет —" else col_time
 col_station = None if col_station == "— нет —" else col_station
 col_vendor = None if col_vendor == "— нет —" else col_vendor
@@ -177,16 +166,25 @@ if df["_dt"].isna().all():
     st.error("Не удалось распарсить даты (все значения пустые). Проверь формат даты/времени.")
     st.stop()
 
+# ======== Завод (строго 3 значения) ========
 if col_vendor and col_vendor in df.columns:
-    df["Завод"] = df[col_vendor].astype(str).apply(lambda x: vendor_to_plant(x, vendor_map))
+    df["Завод"] = df[col_vendor].astype(str).apply(vendor_to_plant)
 else:
-    df["Завод"] = "—"
+    df["Завод"] = "Другое"
 
-# ======== фильтры ========
+# Диагностика: какие значения реально пришли в колонке производителя/завода
+with st.expander("🔎 Диагностика завода"):
+    if col_vendor and col_vendor in df.columns:
+        vc = df[col_vendor].astype(str).value_counts().head(30).reset_index()
+        vc.columns = ["Значение в исходной колонке", "Строк"]
+        st.dataframe(vc, use_container_width=True, hide_index=True)
+    st.write("После нормализации (Завод):")
+    st.dataframe(df["Завод"].value_counts().reset_index().rename(columns={"index":"Завод","Завод":"Строк"}), use_container_width=True, hide_index=True)
+
+# ======== ФИЛЬТРЫ (2025 по умолчанию) ========
 st.subheader("Фильтры")
 f1, f2, f3, f4 = st.columns([1.2, 1.2, 1.4, 1.2])
 
-# ограничиваем 2025 по умолчанию
 df_2025 = df[df["_dt"].dt.year == 2025].copy()
 if df_2025.empty:
     st.warning("В данных нет 2025 года (или даты не распарсились как 2025). Показываю всё, что есть.")
@@ -198,10 +196,7 @@ max_d = df_2025["_dt"].max().date()
 with f1:
     period_mode = st.radio("Период", ["Весь 2025", "Месяц", "Диапазон"], horizontal=False)
 with f2:
-    if period_mode == "Месяц":
-        month = st.selectbox("Месяц", [f"2025-{m:02d}" for m in range(1, 13)], index=0)
-    else:
-        month = None
+    month = st.selectbox("Месяц", [f"2025-{m:02d}" for m in range(1, 13)], index=0) if period_mode == "Месяц" else None
 with f3:
     if period_mode == "Диапазон":
         start_date = st.date_input("С даты", value=min_d)
@@ -209,8 +204,7 @@ with f3:
     else:
         start_date, end_date = None, None
 with f4:
-    plant_filter = st.multiselect("Завод", options=sorted(df_2025["Завод"].unique()),
-                                  default=[p for p in ["ЕПРОМ","НСП"] if p in set(df_2025["Завод"].unique())])
+    plant_filter = st.multiselect("Завод", options=PLANTS, default=["E-Prom","NSP"])
 
 fdf = df_2025.copy()
 if period_mode == "Месяц" and month:
@@ -229,32 +223,32 @@ total = int(len(fdf))
 uniq_station = int(fdf[col_station].nunique()) if col_station else 0
 k1.metric("Обращений", total)
 k2.metric("Уникальных ЭЗС", uniq_station if col_station else "—")
-k3.metric("ЕПРОМ", int((fdf["Завод"] == "ЕПРОМ").sum()) if total else 0)
-k4.metric("НСП", int((fdf["Завод"] == "НСП").sum()) if total else 0)
+k3.metric("E-Prom", int((fdf["Завод"] == "E-Prom").sum()) if total else 0)
+k4.metric("NSP", int((fdf["Завод"] == "NSP").sum()) if total else 0)
 
 st.divider()
 
-# ======== 1) Причина x Завод ========
-st.markdown("### Разбивка по причинам × завод (ЕПРОМ / НСП)")
-reason_x_plant = pd.crosstab(
+# ======== 1) Причина x Завод (строго 3 колонки) ========
+st.markdown("### Разбивка по причинам × завод (E-Prom / NSP)")
+tab = pd.crosstab(
     fdf[col_reason].fillna("—").astype(str),
-    fdf["Завод"].fillna("—").astype(str),
+    fdf["Завод"].fillna("Другое").astype(str),
     dropna=False,
 )
 
-# фиксируем колонки (чтобы всегда были ЕПРОМ/НСП)
-for col in ["ЕПРОМ","НСП","Другое","—"]:
-    if col not in reason_x_plant.columns:
-        reason_x_plant[col] = 0
-reason_x_plant = reason_x_plant[["ЕПРОМ","НСП","Другое","—"]]
-reason_x_plant = add_totals(reason_x_plant, row_name="Итого")
+# гарантируем строго 3 колонки и порядок
+for p in PLANTS:
+    if p not in tab.columns:
+        tab[p] = 0
+tab = tab[PLANTS]
+tab = add_totals(tab, row_name="Итого")
 
-view_reason = reason_x_plant.reset_index().rename(columns={col_reason: "Причина", "index": "Причина"})
+view_reason = tab.reset_index().rename(columns={"index":"Причина", col_reason:"Причина"})
 st.dataframe(view_reason, use_container_width=True, hide_index=True)
 
 st.divider()
 
-# ======== 2) Помесячно 2025 (по всем листам, не по фильтрам) ========
+# ======== 2) Помесячно 2025 (по всем листам) ========
 st.markdown("### Все обращения по месяцам 2025 (по всем листам)")
 all_2025 = df[df["_dt"].dt.year == 2025].copy()
 pr = pd.period_range("2025-01", "2025-12", freq="M")
@@ -272,9 +266,9 @@ st.divider()
 
 # ======== 3) ТОП-5 ЭЗС ========
 st.markdown("### ТОП-5 ЭЗС по обращениям (по фильтрам)")
+top5_view = pd.DataFrame()
 if not col_station:
     st.info("Колонка 'Номер ЭЗС' не выбрана — ТОП-5 недоступен.")
-    top5_view = pd.DataFrame()
 else:
     top5 = (
         fdf.groupby(col_station)
@@ -286,7 +280,7 @@ else:
     )
     plant_mode = (
         fdf.groupby(col_station)["Завод"]
-           .agg(lambda s: s.dropna().astype(str).mode().iloc[0] if len(s.dropna()) else "—")
+           .agg(lambda s: s.dropna().astype(str).mode().iloc[0] if len(s.dropna()) else "Другое")
     )
     top5["Завод"] = top5[col_station].map(plant_mode)
     top5_view = top5
@@ -297,7 +291,7 @@ st.divider()
 # ======== Сырые данные ========
 st.markdown("### Сырые данные (по фильтрам)")
 show_cols = []
-for c in [auto_id, col_date, col_time, col_reason, "Завод", col_station, col_vendor, col_note, "_source_gid"]:
+for c in [col_date, col_time, col_reason, "Завод", col_station, col_vendor, col_note, "_source_gid"]:
     if c and c in fdf.columns and c not in show_cols:
         show_cols.append(c)
 
@@ -317,7 +311,6 @@ with d1:
     )
 
 with d2:
-    from io import BytesIO
     bio = BytesIO()
     with pd.ExcelWriter(bio, engine="openpyxl") as w:
         view_reason.to_excel(w, sheet_name="reason_x_plant", index=False)
@@ -332,4 +325,4 @@ with d2:
         mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
     )
 
-st.caption("Лёгкая версия: причины берутся 1-в-1 из Google Sheets; завод = ЕПРОМ/НСП по производителю; месяцы 2025 считаются по всем указанным GID.")
+st.caption("Лёгкая версия v2: заводы строго E-Prom/NSP/Другое (пусто/не распознано). Добавлен блок диагностики значений в исходной колонке.")
