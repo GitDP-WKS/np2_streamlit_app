@@ -27,7 +27,7 @@ DEFAULT_THEME_RULES = [
 
 
 def gsheets_csv_url(sheet_id: str, gid: str) -> str:
-    # Public export URL (works when sheet is shared "anyone with link" as Viewer)
+    # Works when sheet is shared "anyone with link" as Viewer
     return f"https://docs.google.com/spreadsheets/d/{sheet_id}/export?format=csv&gid={gid}"
 
 
@@ -41,7 +41,6 @@ def pick_col(columns: List[str], candidates: List[str]) -> Optional[str]:
         key = _norm(cand)
         if key in norm_cols:
             return norm_cols[key]
-    # fallback: partial match
     for cand in candidates:
         key = _norm(cand)
         for n, orig in norm_cols.items():
@@ -60,12 +59,11 @@ def parse_datetime(df: pd.DataFrame) -> Tuple[pd.DataFrame, str, str]:
     df = normalize_columns(df)
 
     col_date = pick_col(df.columns.tolist(), ["Дата обращения", "Дата", "Date"])
-    col_time = pick_col(df.columns.tolist(), ["Время обращения", "Время", "Time", "Время обращения "])
+    col_time = pick_col(df.columns.tolist(), ["Время обращения", "Время", "Time"])
 
     if col_date is None:
         raise ValueError("Не нашёл колонку с датой. Ожидал 'Дата обращения'.")
 
-    # В некоторых выгрузках время может быть пустым — тогда считаем только дату
     if col_time is None:
         df["_dt"] = pd.to_datetime(df[col_date], dayfirst=True, errors="coerce")
         return df, col_date, ""
@@ -80,16 +78,22 @@ def parse_datetime(df: pd.DataFrame) -> Tuple[pd.DataFrame, str, str]:
 
 def add_week(df: pd.DataFrame) -> pd.DataFrame:
     df = df.copy()
-    # Неделя с началом в понедельник
     df["_week_start"] = df["_dt"].dt.to_period("W-MON").dt.start_time
     df["_week_label"] = df["_week_start"].dt.strftime("%Y-%m-%d")
+    return df
+
+
+def add_month(df: pd.DataFrame) -> pd.DataFrame:
+    df = df.copy()
+    df["_month"] = df["_dt"].dt.to_period("M").dt.start_time
+    df["_month_label"] = df["_dt"].dt.to_period("M").astype(str)
     return df
 
 
 def classify_theme(reason: str, rules: List[Dict]) -> str:
     text = _norm(reason)
     for r in rules:
-        theme = r.get("theme", "").strip() or "Без темы"
+        theme = (r.get("theme", "") or "").strip() or "Без темы"
         kws = r.get("keywords", [])
         if any(_norm(k) in text for k in kws if str(k).strip()):
             return theme
@@ -105,8 +109,7 @@ def apply_themes(df: pd.DataFrame, reason_col: str, rules: List[Dict]) -> pd.Dat
 @st.cache_data(ttl=600, show_spinner=False)
 def load_data(sheet_id: str, gid: str) -> pd.DataFrame:
     url = gsheets_csv_url(sheet_id, gid)
-    df = pd.read_csv(url)
-    return df
+    return pd.read_csv(url)
 
 
 def to_csv_bytes(df: pd.DataFrame) -> bytes:
@@ -155,8 +158,7 @@ try:
     raw = load_data(sheet_id, gid)
 except Exception as e:
     st.error(
-        "Не смог загрузить таблицу. "
-        "Проверь доступ (публичный просмотр) и правильность Sheet ID / GID.\n\n"
+        "Не смог загрузить таблицу. Проверь доступ (публичный просмотр) и правильность Sheet ID / GID.\n\n"
         f"Текст ошибки: {e}"
     )
     st.stop()
@@ -175,6 +177,7 @@ if col_reason is None:
     st.stop()
 
 df = add_week(df)
+df = add_month(df)
 df = apply_themes(df, col_reason, theme_rules)
 
 # --- Filters ---
@@ -186,7 +189,6 @@ max_dt = df["_dt"].max()
 c1, c2, c3, c4 = st.columns([1.2, 1.2, 1.2, 1.4])
 
 with c1:
-    # default: latest week
     latest_week = df["_week_label"].dropna().max()
     week_mode = st.radio("Период", ["Последняя неделя", "Выбор недели", "Диапазон дат"], horizontal=False)
 
@@ -211,7 +213,6 @@ with c4:
         placeholder="Все тематики",
     )
 
-# manufacturer filter
 if col_vendor is not None:
     vendors = sorted([v for v in df[col_vendor].dropna().unique()])
     vendor_filter = st.multiselect("Производитель", options=vendors, default=[], placeholder="Все производители")
@@ -225,7 +226,6 @@ if week_mode in ("Последняя неделя", "Выбор недели") a
     fdf = fdf[fdf["_week_label"] == week]
 
 if week_mode == "Диапазон дат" and start_date and end_date:
-    # inclusive end date
     fdf = fdf[(fdf["_dt"] >= pd.to_datetime(start_date)) & (fdf["_dt"] < pd.to_datetime(end_date) + pd.Timedelta(days=1))]
 
 if theme_filter:
@@ -276,9 +276,48 @@ with right:
 
 st.divider()
 
+# --- NEW: Vendor x Theme ---
+st.markdown("#### Производители × тематики (сколько обращений по каким проблемам)")
+if col_vendor is None:
+    st.info("В источнике нет колонки 'Производитель станции' — эта сводка недоступна.")
+    vendor_theme = pd.DataFrame()
+else:
+    vendor_theme = pd.pivot_table(
+        fdf,
+        index=col_vendor,
+        columns="Тема",
+        values=col_reason,
+        aggfunc="size",
+        fill_value=0,
+        margins=True,
+        margins_name="Итого",
+    ).reset_index().rename(columns={col_vendor: "Производитель"})
+    st.dataframe(vendor_theme, use_container_width=True, hide_index=True)
+
+st.divider()
+
+# --- NEW: Monthly 2024-2025 summary (ALL data) ---
+st.markdown("#### Все обращения по месяцам (2024–2025)")
+# total monthly across ALL df (не по фильтрам)
+df_2425 = df[df["_dt"].dt.year.isin([2024, 2025])].copy()
+month_range = pd.period_range("2024-01", "2025-12", freq="M")
+
+monthly_series = (
+    df_2425.dropna(subset=["_dt"])
+          .groupby(df_2425["_dt"].dt.to_period("M"))
+          .size()
+          .reindex(month_range, fill_value=0)
+)
+monthly_table = pd.DataFrame([monthly_series.values], columns=monthly_series.index.astype(str))
+monthly_table.insert(0, "Показатель", "Обращения")
+st.dataframe(monthly_table, use_container_width=True, hide_index=True)
+
+st.divider()
+
 st.markdown("#### ТОП-5 ЭЗС по обращениям (в выбранном периоде)")
 if col_station is None:
     st.warning("Не нашёл колонку 'Номер ЭЗС' — ТОП-5 по станциям недоступен.")
+    top5 = pd.DataFrame()
 else:
     top5 = (
         fdf.groupby(col_station)
@@ -289,7 +328,6 @@ else:
            .reset_index()
     )
     if col_vendor is not None:
-        # добавить производителя (самый частый для станции)
         vendor_map = (
             fdf.groupby(col_station)[col_vendor]
                .agg(lambda s: s.dropna().mode().iloc[0] if len(s.dropna().mode()) else "")
@@ -297,21 +335,25 @@ else:
         top5["Производитель"] = top5[col_station].map(vendor_map)
 
     st.dataframe(top5, use_container_width=True, hide_index=True)
-
-    # Барчарт для топ-5
     st.bar_chart(top5.set_index(col_station)["Обращения"])
 
 st.divider()
 
 st.markdown("#### Сырые данные (после фильтров)")
-show_cols = []
+show_cols: List[str] = []
 for c in [col_id, col_date, col_time, col_reason, "Тема", col_station, col_vendor, col_note]:
     if c and c in fdf.columns and c not in show_cols:
         show_cols.append(c)
 if not show_cols:
-    show_cols = fdf.columns.tolist()
+    show_cols = [c for c in fdf.columns if c not in ["_week_start"]]
 
-st.dataframe(fdf[show_cols].sort_values("_dt", ascending=False), use_container_width=True, hide_index=True)
+# FIX: сортируем до выбора колонок, чтобы не было KeyError по _dt
+if "_dt" in fdf.columns:
+    display_df = fdf.sort_values("_dt", ascending=False)[show_cols]
+else:
+    display_df = fdf[show_cols]
+
+st.dataframe(display_df, use_container_width=True, hide_index=True)
 
 # --- Downloads ---
 st.markdown("### Экспорт")
@@ -320,17 +362,22 @@ d1, d2 = st.columns([1, 1])
 with d1:
     st.download_button(
         "⬇️ Скачать CSV (по фильтрам)",
-        data=to_csv_bytes(fdf[show_cols]),
+        data=to_csv_bytes(display_df),
         file_name="ezs_filtered.csv",
         mime="text/csv",
     )
 
 with d2:
-    # несколько листов: raw filtered + theme + top5
-    sheets = {"filtered": fdf[show_cols]}
-    sheets["themes"] = theme_counts
-    if col_station is not None:
-        sheets["top5"] = top5 if "top5" in locals() else pd.DataFrame()
+    sheets: Dict[str, pd.DataFrame] = {
+        "filtered": display_df,
+        "themes_filtered": theme_counts,
+        "monthly_2024_2025": monthly_table,
+    }
+    if col_vendor is not None and len(vendor_theme):
+        sheets["vendor_theme_filtered"] = vendor_theme
+    if len(top5):
+        sheets["top5_filtered"] = top5
+
     st.download_button(
         "⬇️ Скачать Excel (сводка)",
         data=to_excel_bytes(sheets),
@@ -338,4 +385,4 @@ with d2:
         mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
     )
 
-st.caption("Если хочешь — добавлю отдельный блок “ТОП причин” и переключатель “месяц/квартал/год”.")
+st.caption("Версия: v2 — исправлен KeyError при сортировке + добавлены сводки Производитель×Тематика и помесячная (2024–2025).")
