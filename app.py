@@ -14,8 +14,8 @@ DEFAULT_GIDS: List[str] = [
     "100006210","1678514560","1664238791","1022163523","824830115","2075524941"
 ]
 
-# Колонки заводов строго такие:
-PLANTS = ["E-Prom", "NSP", "Другое"]  # "Другое" = нет принадлежности к заводу / пусто / не распознано
+# ВАЖНО: по твоей правке — "NSP" в таблицах = "ЗЭТЗ"
+PLANTS = ["E-Prom", "ЗЭТЗ", "Другое"]  # "Другое" = нет принадлежности / пусто / не распознано
 
 # ======== ВСПОМОГАТЕЛЬНЫЕ ========
 def gsheets_csv_url(sheet_id: str, gid: str) -> str:
@@ -45,16 +45,21 @@ def pick_col(columns: List[str], candidates: List[str]) -> Optional[str]:
     return None
 
 def vendor_to_plant(v: str) -> str:
-    """Строго: E-Prom / NSP / Другое."""
+    """Строго: E-Prom / ЗЭТЗ / Другое.
+    NSP в исходных данных считаем как ЗЭТЗ (как ты написал).
+    """
     s = norm(v)
     if not s or s == "nan":
         return "Другое"
-    # NSP
-    if "nsp" in s or "нсп" in s:
-        return "NSP"
+
+    # ЗЭТЗ (включая "NSP" как обозначение в таблицах)
+    if "зэтз" in s or "zetz" in s or "nsp" in s or "нсп" in s:
+        return "ЗЭТЗ"
+
     # E-Prom
     if "e-prom" in s or "eprom" in s or "e prom" in s or "е-пром" in s or "епром" in s:
         return "E-Prom"
+
     return "Другое"
 
 def parse_dt_smart(df: pd.DataFrame, col_date: str, col_time: Optional[str]) -> pd.Series:
@@ -172,14 +177,17 @@ if col_vendor and col_vendor in df.columns:
 else:
     df["Завод"] = "Другое"
 
-# Диагностика: какие значения реально пришли в колонке производителя/завода
+# Диагностика завода
 with st.expander("🔎 Диагностика завода"):
     if col_vendor and col_vendor in df.columns:
         vc = df[col_vendor].astype(str).value_counts().head(30).reset_index()
         vc.columns = ["Значение в исходной колонке", "Строк"]
         st.dataframe(vc, use_container_width=True, hide_index=True)
     st.write("После нормализации (Завод):")
-    st.dataframe(df["Завод"].value_counts().reset_index().rename(columns={"index":"Завод","Завод":"Строк"}), use_container_width=True, hide_index=True)
+    st.dataframe(
+        df["Завод"].value_counts().reset_index().rename(columns={"index":"Завод","Завод":"Строк"}),
+        use_container_width=True, hide_index=True
+    )
 
 # ======== ФИЛЬТРЫ (2025 по умолчанию) ========
 st.subheader("Фильтры")
@@ -204,7 +212,7 @@ with f3:
     else:
         start_date, end_date = None, None
 with f4:
-    plant_filter = st.multiselect("Завод", options=PLANTS, default=["E-Prom","NSP"])
+    plant_filter = st.multiselect("Завод", options=PLANTS, default=["E-Prom","ЗЭТЗ"])
 
 fdf = df_2025.copy()
 if period_mode == "Месяц" and month:
@@ -224,19 +232,18 @@ uniq_station = int(fdf[col_station].nunique()) if col_station else 0
 k1.metric("Обращений", total)
 k2.metric("Уникальных ЭЗС", uniq_station if col_station else "—")
 k3.metric("E-Prom", int((fdf["Завод"] == "E-Prom").sum()) if total else 0)
-k4.metric("NSP", int((fdf["Завод"] == "NSP").sum()) if total else 0)
+k4.metric("ЗЭТЗ", int((fdf["Завод"] == "ЗЭТЗ").sum()) if total else 0)
 
 st.divider()
 
 # ======== 1) Причина x Завод (строго 3 колонки) ========
-st.markdown("### Разбивка по причинам × завод (E-Prom / NSP)")
+st.markdown("### Разбивка по причинам × завод (E-Prom / ЗЭТЗ)")
 tab = pd.crosstab(
     fdf[col_reason].fillna("—").astype(str),
     fdf["Завод"].fillna("Другое").astype(str),
     dropna=False,
 )
 
-# гарантируем строго 3 колонки и порядок
 for p in PLANTS:
     if p not in tab.columns:
         tab[p] = 0
@@ -325,4 +332,4 @@ with d2:
         mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
     )
 
-st.caption("Лёгкая версия v2: заводы строго E-Prom/NSP/Другое (пусто/не распознано). Добавлен блок диагностики значений в исходной колонке.")
+st.caption("Лёгкая версия v3: 'NSP' в исходных значениях маппится в 'ЗЭТЗ'. Колонки заводов: E-Prom / ЗЭТЗ / Другое.")
